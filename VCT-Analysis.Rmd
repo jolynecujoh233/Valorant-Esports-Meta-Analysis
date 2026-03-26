@@ -1,0 +1,246 @@
+---
+title: "Valorant Esports Meta Analysis"
+author: "JOLYNECUJOH233"
+date: "2026-03-24"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    highlight: tango
+  pdf_document:
+    latex_engine: xelatex
+    toc: true
+always_allow_html: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 9, fig.height = 5)
+options(max.print = 80)
+tmap::tmap_options(component.autoscale = FALSE)
+
+```
+
+## Required packages
+
+```{r}
+library(tidyverse)
+library(lubridate)
+library(scales)
+library(sf)
+library(tmap)
+library(maptiles)
+library(ggrepel)
+library(ggridges)
+
+theme_set(theme_minimal(base_size = 12))
+
+pal <- c(
+  nus_blue   = "#003D7C",
+  blue       = "#2E75B6",
+  nus_orange = "#EF7C00",
+  ice        = "#D6E8F7",
+  grey       = "#6B7D8C"
+)
+
+```
+
+Install packages that do not yet have via the *console*:
+
+```{r install, eval=FALSE}
+install.packages(c("sf", "tmap", "maptiles", "ggrepel"))
+```
+
+
+
+------------------------------------------------------------------------
+
+# Valorant Esports Meta Analysis
+
+```{r task3-explore}
+library(ggridges)
+
+
+pick_rates <- map_dfr(2021:2024, function(yr) {
+  read_csv(
+    paste0("data/archive/vct_", yr, "/agents/agents_pick_rates.csv"),
+    show_col_types = FALSE
+  ) %>% mutate(year = yr)
+})
+
+maps_stats <- map_dfr(2021:2024, function(yr) {
+  read_csv(
+    paste0("data/archive/vct_", yr, "/agents/maps_stats.csv"),
+    show_col_types = FALSE
+  ) %>% mutate(year = yr)
+})
+
+
+cat("=== pick_rates line ===\n")
+glimpse(pick_rates)
+
+cat("\n=== maps_stats line ===\n")
+glimpse(maps_stats)
+```
+
+## Valorant Esports Meta Analysis — What defines the professional meta?
+
+### Introduction
+
+This analysis explores the Valorant Champions Tour (VCT) dataset from 2021 to 2024, covering professional esports matches across all major tournaments. The central research question is: **which agents dominate the professional meta, and how balanced are Valorant's maps in terms of attacker vs defender advantage?**
+
+Unlike casual play, professional matches reflect highly optimised strategies, making this dataset a useful lens for understanding game balance — a key concern for both developers and competitive players.
+
+Data source: VCT match data scraped from VLR.gg, available on Kaggle.
+
+### Data loading and preprocessing
+```{r task3-load}
+library(ggridges)
+
+# Load and combine agent pick rates across years
+pick_rates <- map_dfr(2021:2024, function(yr) {
+  read_csv(
+    paste0("data/archive/vct_", yr, "/agents/agents_pick_rates.csv"),
+    show_col_types = FALSE
+  ) %>% mutate(year = yr)
+}) %>%
+  rename(pick_rate_chr = `Pick Rate`, map = Map,
+         agent = Agent, match_type = `Match Type`) %>%
+  mutate(
+    pick_rate = as.numeric(str_remove(pick_rate_chr, "%")) / 100,
+    agent     = str_to_title(agent)
+  ) %>%
+  filter(map == "All Maps")
+
+# Load and combine map stats across years  
+maps_stats <- map_dfr(2021:2024, function(yr) {
+  read_csv(
+    paste0("data/archive/vct_", yr, "/agents/maps_stats.csv"),
+    show_col_types = FALSE
+  ) %>% mutate(year = yr)
+}) %>%
+  rename(
+    map          = Map,
+    atk_win_pct = `Attacker Side Win Percentage`,
+    def_win_pct = `Defender Side Win Percentage`,
+    maps_played  = `Total Maps Played`
+  ) %>%
+  mutate(
+    atk_win = as.numeric(str_remove(atk_win_pct, "%")) / 100,
+    def_win = as.numeric(str_remove(def_win_pct, "%")) / 100
+  ) %>%
+  filter(map != "All Maps", maps_played >= 5)
+
+cat("Pick rate rows:", nrow(pick_rates), "\n")
+cat("Map stats rows:", nrow(maps_stats), "\n")
+cat("Agents found:", n_distinct(pick_rates$agent), "\n")
+cat("Maps found:",   n_distinct(maps_stats$map), "\n")
+```
+
+### Insight 1: Which agents dominate the professional meta?
+```{r task3-plot1-pickrate}
+# Top agents by mean pick rate across all years
+top_agents <- pick_rates %>%
+  group_by(agent) %>%
+  summarise(mean_pick = mean(pick_rate, na.rm = TRUE),
+            .groups = "drop") %>%
+  arrange(desc(mean_pick)) %>%
+  slice_head(n = 15)
+
+ggplot(top_agents, aes(x = mean_pick,
+                       y = reorder(agent, mean_pick))) +
+  geom_col(fill = "#003D7C", width = 0.7) +
+  geom_text(aes(label = paste0(round(mean_pick * 100), "%")),
+            hjust = -0.1, size = 3.5, colour = "#003D7C") +
+  scale_x_continuous(
+    labels = percent_format(),
+    limits = c(0, 1.05)
+  ) +
+  labs(
+    title   = "Top 15 agents by mean pick rate in VCT, 2021–2024",
+    subtitle = "Averaged across all tournaments and stages",
+    x       = "Mean pick rate",
+    y       = NULL,
+    caption = "Data: VLR.gg via Kaggle"
+  )
+```
+
+### Insight 2: How has the meta evolved year by year? (Ridge plot)
+
+Each year's pick rate distribution shows how diverse or concentrated agent selection was in that season.
+```{r task3-plot2-ridge}
+# Focus on top 10 most picked agents overall
+top10 <- top_agents %>% slice_head(n = 10) %>% pull(agent)
+
+pick_rates %>%
+  filter(agent %in% top10) %>%
+  mutate(year = factor(year)) %>%
+  ggplot(aes(x = pick_rate, y = year, fill = year)) +
+  geom_density_ridges(alpha = 0.7, scale = 1.5,
+                      quantile_lines = TRUE, quantiles = 2) +
+  scale_x_continuous(labels = percent_format(), limits = c(0, 1.05)) +
+  scale_fill_manual(values = c(
+    "2021" = "#D6E8F7",
+    "2022" = "#2E75B6",
+    "2023" = "#003D7C",
+    "2024" = "#EF7C00"
+  ), guide = "none") +
+  labs(
+    title    = "Distribution of agent pick rates in VCT, 2021–2024",
+    subtitle = "Top 10 agents only | Lines indicate median",
+    x        = "Pick rate",
+    y        = NULL,
+    caption  = "Data: VLR.gg via Kaggle"
+  )
+```
+
+### Insight 3: Are Valorant's maps balanced between attack and defence?
+
+A balanced map should have an attacker win rate close to 50%. Significant deviations suggest structural advantages for one side.
+```{r task3-plot3-heatmap}
+map_balance <- maps_stats %>%
+  group_by(map) %>%
+  summarise(
+    mean_atk = mean(atk_win, na.rm = TRUE),
+    total_maps = sum(maps_played),
+    .groups = "drop"
+  ) %>%
+  filter(total_maps >= 20) %>%
+  mutate(
+    balance   = mean_atk - 0.5,
+    advantage = if_else(balance > 0, "Attacker favoured", "Defender favoured")
+  )
+
+ggplot(map_balance, aes(x = reorder(map, balance),
+                        y = mean_atk,
+                        fill = advantage)) +
+  geom_col(width = 0.6) +
+  geom_hline(yintercept = 0.5, linetype = "dashed",
+             colour = "grey40", linewidth = 0.8) +
+  annotate("text", x = 1, y = 0.51,
+           label = "Balanced (50%)", hjust = 0,
+           size = 3.2, colour = "grey40") +
+  scale_fill_manual(values = c(
+    "Attacker favoured" = "#EF7C00",
+    "Defender favoured" = "#003D7C"
+  )) +
+  scale_y_continuous(labels = percent_format(), limits = c(0, 0.7)) +
+  labs(
+    title    = "Attacker-side win rate by map in VCT, 2021–2024",
+    subtitle = "Maps with fewer than 20 games excluded",
+    x        = NULL,
+    y        = "Mean attacker win rate",
+    fill     = NULL,
+    caption  = "Data: VLR.gg via Kaggle"
+  ) +
+  theme(legend.position = "bottom")
+```
+
+### Conclusion
+
+The analysis reveals three key insights about the Valorant professional meta. First, a small pool of agents — particularly Jett, Sova, and Viper — have consistently dominated professional pick rates from 2021 to 2024, suggesting that certain kits are structurally better suited to high-level play. Second, the ridge plot shows that pick rate distributions have become more spread out over time, indicating a gradually diversifying meta as new agents are introduced and balance patches take effect. Third, map balance varies considerably: some maps strongly favour defenders, while others give attackers a structural edge, which has direct implications for how teams draft and strategise.
+
+
+
